@@ -1,0 +1,9 @@
+
+seizure/src/patient_specific.py
+seizure/src/main.py
+seizure/src/features.py
+seizure/src/__pycache__/features.cpython-36.pyc
+seizure/data/seizureDict.txt
+seizure/data/seizureChunks14.txt
+seizure/data/nonSeizureFileNames.txt
+seizure/data/nonSeizureChunks14.txt
