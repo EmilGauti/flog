@@ -1,0 +1,1265 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb, amsthm, marvosym, permute, extsizes}
+\usepackage{siunitx, graphicx, float, enumitem, adjustbox, hyperref, bm, bbm}
+\usepackage{microtype, dsfont}
+\usepackage[normalem]{ulem}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{moreenum}
+\usepackage{braket, bbold}
+\usepackage[T1]{fontenc}
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage[icelandic]{babel}
+\def\rcurs{{\mbox{$\resizebox{.09in}{.08in}{\includegraphics[trim= 1em 0 14em 0,clip]{ScriptR}}$}}}
+\def\brcurs{{\mbox{$\resizebox{.09in}{.08in}{\includegraphics[trim= 1em 0 14em 0,clip]{BoldR}}$}}}
+\usepackage{tikz}
+\usepackage{pdfpages}
+\usepackage{todonotes}
+\newcommand{\explain}[2]{\underbrace{#1}_\textrm{$#2$}}
+\newcommand{\angstrom}{\textup{\AA}}
+\usepackage{minted}
+\usepackage{etoolbox}
+\AtBeginEnvironment{minted}{\singlespacing%
+    \fontsize{8}{8}\selectfont}
+
+\begin{document}
+\section*{Viðauki}
+\begin{minted}{python}
+# FEATURES
+
+# Hjorth parameters (time domain)
+# https://en.wikipedia.org/wiki/Hjorth_parameters
+def hjorth_mobility(x):
+    num = np.var(np.diff(x))
+    den = np.var(x)
+    if den > 0:
+        return np.sqrt(num / den)
+    else:
+        return 0.0
+
+def hjorth_parameters(x):
+    activity=np.var(x)
+    mobility=hjorth_mobility(x)
+    if mobility > 0:
+        complexity=hjorth_mobility(np.diff(x)) / mobility
+    else:
+        complexity=0.0
+    return np.array([activity, mobility, complexity])
+
+#Calculates power spectral density for an eeg segment
+#inputs: 
+#signalMat: signal matrix for chunk
+#fs: sampling density
+#n: number of channels
+#outputs: 
+#f: frequency
+#Pwelch: power spectral density calculated by Welch's method
+def psd(signalMat,fs,n,fRange):
+    Pwelch = np.zeros((n,fRange))
+    for i in range(n):
+        F,Pwelch[i,:] = signal.welch(signalMat[i,:],fs,scaling = 'spectrum')
+    return(F,Pwelch)
+
+# Absolute band power
+# Combined power in M frequency bands
+def absolute_power(f, PSD,M,l,h):
+    length = (h-l)/M
+    power = []
+    k = l
+    for i in range(M):
+        power.append(sum(PSD[np.where((f > k) & (f <= k+length))]))
+        k +=length
+    return(power)
+    
+#Relative power of delta, theta, alpha 
+#and beta waves for a single channel
+def relative_power(f,PSD,M,l,h):
+    absPow = absolute_power(f,PSD,M,l,h)
+    tot = sum(PSD)
+    if tot > 0.0:
+        return(absPow/tot)
+    else:
+        return 0.0
+
+# Calculate relative band power for the whole data set
+# THINK: Might want to do the same for absolute power
+def relative_power_all(allData, nrSeizures, nrChannels, fRange, fs, M, fLowerLimit, fUpperLimit):
+    dataPSD = np.zeros((nrSeizures*2,nrChannels,fRange))
+    for i in range(nrSeizures*2):
+        [F,dataPSD[i,:,:]] = psd(allData[i,:,:],fs,nrChannels,fRange)
+
+    dataRelPower = np.zeros((nrSeizures*2,nrChannels,M))
+    for i in range(nrSeizures*2):
+        for j in range(nrChannels):
+            dataRelPower[i,j,:] = relative_power(F,dataPSD[i,j,:],M,fLowerLimit,fUpperLimit)
+    return(dataRelPower)
+    
+def create_data_matrix(allData, nrSeizures, nrChannels, fRange, fs, M, fLowerLimit,
+                        fUpperLimit, seizureLength, tlength, hjorth = True):
+    
+    assert tlength <= seizureLength, 'tlength more than seizureLength'
+    numt = seizureLength - tlength + 1
+    dataRelPower = np.zeros((nrSeizures*2, nrChannels, M, numt))
+    k = 0
+    while k+tlength <= seizureLength:
+        tData = allData[:,:,k:int(k+tlength*fs-1)]
+        dataRelPower[:,:,:,k] = relative_power_all(tData, nrSeizures, nrChannels, fRange, fs, M, fLowerLimit, fUpperLimit)
+        k += 1
+        
+    dataRelPowerFlat = np.zeros((nrSeizures*2,nrChannels*M*numt))
+    for i in range(nrSeizures*2):
+        dataRelPowerFlat[i,:] = dataRelPower[i,:,:,:].flatten()
+        
+    if hjorth:
+        hjopar = np.zeros((nrSeizures*2,nrChannels,3,numt))
+        for i in range(nrSeizures*2):
+            for j in range(nrChannels):
+                k = 0
+                while k+tlength <= seizureLength:
+                    tData = allData[:,:,k:int(k+tlength*fs-1)]
+                    hjopar[i,j,:,k] = hjorth_parameters(tData[i,j,:])
+                    k += 1
+                    
+        hjoparflat = np.zeros((nrSeizures*2,nrChannels*3*numt))
+        for i in range(nrSeizures*2):
+            hjoparflat[i,:] = hjopar[i,:,:,:].flatten()
+        dataRelPowerFlat = np.c_[dataRelPowerFlat, hjoparflat]
+    
+    
+    X = dataRelPowerFlat
+    y = np.concatenate((np.repeat(1,nrSeizures-100),np.repeat(0,nrSeizures+100)))
+        
+    return(X,y)
+\end{minted}
+\newpage
+
+\begin{minted}{python}
+# READ DATA
+
+#input: 
+#filename: name of file to read from
+#shape: dimension of resulting array                   
+def read3DArrayFromFile(fileName,shape):                      
+    data = np.loadtxt(fileName, dtype = 'float32')
+    data = data.reshape(shape)
+    return(data)
+
+nrPatients = 24
+fs = 256 # Sampling rate
+nrChannels = 23
+seizureLength = 14 # seconds
+nrSeizures = 170
+fRange = 129
+M = 16
+fLowerLimit = 0.5
+fUpperLimit = 25
+dataShape = (nrSeizures,nrChannels,seizureLength*fs)
+dataShape_extra = (200,nrChannels,seizureLength*fs)
+# Read raw data
+seizureData = read3DArrayFromFile('seizureChunks14.txt',dataShape)
+nonSeizureData = read3DArrayFromFile('nonSeizureChunks14.txt',dataShape)
+nonSeizureData_extra = read3DArrayFromFile('nonSeizureChunks14_extra.txt',dataShape_extra)
+allData = np.concatenate((seizureData,nonSeizureData),axis = 0)
+allData = np.concatenate((allData,nonSeizureData_extra),axis=0)
+\end{minted}
+\newpage
+
+\begin{minted}{python}
+# FLOKKARAR
+
+maxtlength=11
+mintlength=10
+#scores_asl = np.zeros((maxtlength-mintlength,3,2))
+for tlength in range(mintlength,maxtlength):
+    10sec skilar besta
+
+    [X,y] = create_data_matrix(allData, nrSeizures+100, nrChannels, fRange, fs, M, fLowerLimit,
+                                fUpperLimit, seizureLength, tlength, hjorth = False)
+    print("X:", X.shape)
+    print("y:", y.shape)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=10)
+    print(np.max(X_train), np.min(X_train))
+    print(np.max(X_test), np.min(X_test))
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_test = scaler.transform(X_test)
+    print(np.max(X_train), np.min(X_train))
+    print(np.max(X_test), np.min(X_test))
+    clf_ada = AdaBoostClassifier(DecisionTreeClassifier(max_depth=2), n_estimators = 100)
+    clf_svm = SVC(kernel='rbf',C = 8, gamma= 0.00015)
+    clf_LR=LogisticRegression(max_iter  = 200, C=0.001)
+
+    name = [clf_svm,clf_LR,clf_ada]
+    names_s = ['clf_svm', 'clf_LR', 'clf_ada']
+    print('-'*50)
+    print('tlength: ',tlength)
+    for i in range(len(name)):
+        name[i].fit(X_train,y_train)
+       # scores_asl[tlength-mintlength,i,0] = name[i].score(X_test,y_test)
+       # scores_asl[tlength-mintlength,i,1] = name[i].score(X_train,y_train)
+        print(names_s[i]+' test score:' , name[i].score(X_test,y_test))
+        print(names_s[i]+' train score:' , name[i].score(X_train,y_train))
+        print()
+\end{minted}
+\newpage
+
+\begin{minted}{python}
+# GÆÐAMAT Á FLOKKURUM
+""" þarfnast að gögnin séu tilbúin """
+
+
+def GS(estimator, parameters):
+    clf = GridSearchCV(estimator, parameters, cv = 5)
+    clf.fit(X_train, y_train)
+    acc = clf.score(X_test, y_test)
+    y_pred = clf.predict(X_test)
+    
+    cm = confusion_matrix(y_test, y_pred)
+    sens = cm[1,1]/(cm[1,1] + cm[1,0])
+    spec = cm[0,0]/(cm[0,0] + cm[0,1])
+    
+    opt_par = clf.best_params_
+
+    return opt_par, acc, sens, spec
+
+params_LR = {'C' : [0.5, 1, 5, 8, 10, 20] }
+
+params_svm = {'C' : [0.5, 1, 5, 8, 10, 20],
+              'gamma' : [0.0015, 0.01, 0.1, 1] }
+
+params_ada = {'n_estimators' : [25, 50, 100, 150], 
+              'learning_rate':[0.01, 0.1, 0.5, 1] }
+
+compare_clf = np.zeros((3, 3))
+
+logreg_GS = GS(LogisticRegression(), params_LR)
+svm_GS = GS(SVC(), params_svm)
+ada_GS = GS(AdaBoostClassifier(DecisionTreeClassifier(max_leaf_nodes = 4)), params_ada)
+
+logreg_par = logreg_GS[0]
+svm_par = svm_GS[0]
+ada_par = ada_GS[0]
+
+compare_clf[0,:] = logreg_GS[1:]
+compare_clf[1,:] = svm_GS[1:]
+compare_clf[2,:] = ada_GS[1:]
+
+# plot comparison
+plt.rcParams.update({'font.size': 20})
+
+index = np.arange(3)
+bar_width = 0.2
+
+plt.figure(figsize = (18, 8))
+
+plt.bar(index, compare_clf[0,:], bar_width, color='darkorange', label='LogReg')
+plt.bar(index + bar_width, compare_clf[1,:], bar_width, color='darkcyan', label='SVM')
+plt.bar(index + 2*bar_width, compare_clf[2,:], bar_width, color='darkmagenta', label='AdaBoost')
+plt.grid(axis = 'y', linestyle = '-.', color = 'black')
+
+plt.title('Samanburður á flokkurum')
+plt.xticks(index + bar_width, ['Accuracy', 'Sensitivity', 'Specificity'])
+plt.legend()
+plt.show()
+
+print('Stikar LogReg', logreg_par)
+print('Stikar SVM', svm_par)
+print('Stikar AdaBoost', ada_par)
+\end{minted}
+\newpage
+
+\begin{minted}{python}
+#SVM Finna stærð besta tímaramma
+maxtlength=15
+mintlength=2
+svm_scores2 = np.zeros((13,2))
+sens = np.zeros((13))
+spec = np.zeros((13))
+k=0
+for tlength in range(mintlength,maxtlength):
+
+    [X,y] = create_data_matrix(allData, nrSeizures+100, nrChannels, fRange, fs, M, fLowerLimit, 
+                                fUpperLimit, seizureLength, tlength, hjorth = True)
+    print("X:", X.shape)
+    print("y:", y.shape)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_test = scaler.transform(X_test) 
+    clf_svm = SVC(kernel='rbf',C=8,gamma=0.0015)
+
+    print('-'*50)
+    print('tlength: ',tlength)
+    clf_svm.fit(X_train,y_train)
+    
+    y_pred = clf_svm.predict(X_test)
+    cm = confusion_matrix(y_test, y_pred)
+    sens[k] = cm[1,1]/(cm[1,1] + cm[1,0])
+    spec[k] = cm[0,0]/(cm[0,0] + cm[0,1])
+    
+    svm_scores2[k,0] = clf_svm.score(X_test,y_test)
+    svm_scores2[k,1] = clf_svm.score(X_train,y_train)
+    print('SVM test score:' , clf_svm.score(X_test,y_test))
+    print('SVM train score:' , clf_svm.score(X_train,y_train))
+    print('Spec: ', spec[k], 'Sens: ', sens[k])
+    print()
+    k+=1
+    
+timar = np.arange(2,15)
+plt.rcParams.update({'font.size':20})
+
+plt.figure(figsize=(12,8))
+
+plt.xlabel('Stærð tímaramma[s]')
+
+plt.plot(timar, svm_scores2[:,0], label = 'Prófunarnákvæmni')
+plt.plot(timar, sens, label = 'Næmi')
+plt.plot(timar, spec, label = 'Sértækni')
+
+plt.legend()
+plt.grid()
+\end{minted}
+\newpage
+
+\begin{minted}{python}
+# SPECTROGRAM
+from scipy.signal import spectrogram
+
+seglength = 2
+stepsize = 1
+
+freq = int(fs*seglength / 2) + 1
+time = int(seizureLength / stepsize)-1
+
+spectroData = np.zeros((nrSeizures*2, freq, time, nrChannels))
+
+for i in range(nrSeizures*2):
+    for j in range(nrChannels):
+        freqq, timee, Sx = signal.spectrogram(allData[i, j, :], fs = fs, nperseg = fs*seglength,
+                                                noverlap = fs*(seglength - stepsize))
+        spectroData[i, :, :, j] = 10 * np.log10(Sx)
+
+# PLOT SPECTROGRAM
+
+import matplotlib.pyplot as plt
+plt.rcParams.update({'font.size': 20})
+
+seizCase = 150
+nonseizCase = -13
+
+
+plt.figure(figsize=(24,16))
+
+plt.subplot(2,2,1)
+plt.plot(range(fs*seizureLength), allData[seizCase,1,:], 'b-')
+plt.xticks(np.arange(15)*fs, np.arange(15))
+plt.xlabel('Tími (sek)')
+plt.title('Tímaröð af flogakasti')
+
+plt.subplot(2,2,2)
+plt.plot(range(fs*seizureLength), allData[nonseizCase,10,:], 'b-')
+plt.xticks(np.arange(15)*fs, np.arange(15))
+plt.xlabel('Tími (sek)')
+plt.title('Tímaröð af heilbrigðu heilariti')
+
+plt.subplot(2,2,3)
+plt.pcolormesh(range(time), np.arange(0, freq/2, 0.5) / 1000, spectroData[seizCase,:,:,1], cmap='viridis')
+plt.ylabel('Tíðni (kHz)')
+plt.xlabel('Tími (sek)')
+plt.title('Rófrit af flogakasti')
+
+plt.subplot(2,2,4)
+plt.pcolormesh(range(time), np.arange(0, freq/2, 0.5) / 1000, spectroData[nonseizCase,:,:,10], cmap='viridis')
+plt.ylabel('Tíðni (kHz)')
+plt.xlabel('Tími (sek)')
+plt.title('Rófrit af heilbrigðu heilariti')
+plt.show
+
+plt.savefig('rofrit.png')
+\end{minted}
+\newpage
+
+\begin{minted}{python}
+# TAUGANET
+
+X_train, X_test, y_train, y_test = train_test_split(spectroData, y, test_size=0.25, random_state=24)
+
+# Convert to 32-bit floats
+X_train = X_train.astype('float32')
+X_test = X_test.astype('float32')
+
+print(X_train.shape)
+num_epochs = 30
+input_shape = X_train.shape[1:]
+
+# set up early stopping
+es = EarlyStopping(monitor='val_loss',
+                   min_delta=0,
+                   patience=3,
+                   verbose=0, mode='auto')
+
+nn = Sequential([ 
+    Conv2D(60, kernel_size=(6, 2), activation='relu', padding = "same", input_shape = input_shape),
+    Conv2D(60, kernel_size=(6, 2), activation='relu', padding = "same"),
+    MaxPooling2D(pool_size=(3, 2)),
+    Conv2D(120, kernel_size=(3, 3), activation='relu', padding = "same"),
+    Conv2D(120, kernel_size=(3, 3), activation='relu', padding = "same"),
+    MaxPooling2D(pool_size=(2, 2)),
+    Conv2D(180, kernel_size=(3, 3), activation='relu', padding = "same"),
+    Conv2D(180, kernel_size=(3, 3), activation='relu', padding = "same"),
+    MaxPooling2D(pool_size=(2, 2)),
+    Flatten(),
+    Dense(1000, activation = 'relu'),
+    Dropout(0.5),
+    Dense(200, activation = 'relu'),
+    Dropout(0.1),
+    Dense(100, activation = 'relu'),
+    Dense(1, activation = 'sigmoid') ])
+
+nn.summary()
+
+nn.compile(loss='binary_crossentropy',
+              optimizer=Adadelta(),
+              metrics=['accuracy'])
+
+history = nn.fit(X_train, y_train,
+                  epochs=num_epochs,
+                  callbacks = [es],
+                  verbose=1,
+                  validation_data=(X_test, y_test))
+score = nn.evaluate(X_test, y_test, verbose=0)
+print('val loss:', score[0])
+print('val accuracy:', score[1])
+
+# Visualize training history 
+import matplotlib.pyplot as plt
+
+plt.figure(figsize = (15,5))
+plt.subplot(1,2,1)
+plt.plot(history.history['acc'])
+plt.plot(history.history['val_acc'])
+plt.ylabel('accuracy')
+plt.xlabel('epoch')
+plt.title('Lærdómur Tauganetsins')
+plt.legend(['train', 'validation'])
+
+plt.subplot(1,2,2)
+plt.plot(history.history['loss'])
+plt.plot(history.history['val_loss'])
+plt.ylabel('loss')
+plt.xlabel('epoch')
+plt.legend(['train', 'validation'])
+plt.show()
+\end{minted}
+\newpage
+
+\begin{minted}{python}
+# TAUGANETSRUGLINGSFYLKI
+
+y_pred = nn.predict(X_test)
+
+for i in range(y_pred.shape[0]):
+  if y_pred[i] > 0.5:
+    y_pred[i] = 1
+  else:
+    y_pred[i] = 0
+    
+nncm = confusion_matrix(y_test,y_pred)
+plt.figure(figsize=(7,7))
+plt.imshow(nncm, cmap='Wistia')
+plt.xlabel('Raunverulegt gildi')
+plt.ylabel('Metið gildi')
+plt.xticks([0,1], ['Ekki flog', 'Flog'])
+plt.yticks([0,1], ['Ekki flog', 'Flog'], rotation = 90, va = 'center')
+n = nncm.shape[0]
+p = nncm.shape[1]
+for i in range(n):
+    for j in range(p):        
+        plt.annotate(str(nncm[i,j]),xy=(i,j), 
+                     horizontalalignment='center', verticalalignment='center')
+        
+sens = nncm[1,1]/(nncm[1,1] + nncm[1,0])
+spec = nncm[0,0]/(nncm[0,0] + nncm[0,1])
+
+print('Model sensitivity:', sens)
+print('Model specificity:', spec)
+
+print('Matthews correlation coefficient ', metrics.matthews_corrcoef(y_test, y_pred))  
+\end{minted}
+\newpage
+
+\begin{minted}{python}
+# PATIENT SPECIFIC
+
+# -*- coding: utf-8 -*-
+
+# Patient-specific classifier
+
+# Pre: Execute main.py
+
+def fixIndex(i):
+    if i < 10:
+        i = '0'+str(i)
+    return(str(i))
+
+nonSeizureFileNames = open('nonSeizureFileNames.txt', 'r')
+nonSeizureFileNames = nonSeizureFileNames.read().split('\n')
+
+with open('seizureDict.txt', 'r') as f:
+    s = f.read()
+    seizureDict = ast.literal_eval(s)
+
+patientResults = np.zeros((nrPatients+1, 7))
+
+for testPatient in range(1,nrPatients+1):
+    #gets index of seizures that belong to testPatient (+nrSeizures since seizure chunks are first in allData)
+    prefix = 'chb'+fixIndex(testPatient)
+    nonSeizIndices = [i+nrSeizures for i, s in enumerate(nonSeizureFileNames) if s.startswith(prefix)]
+    testPatientKeys = [i for i in seizureDict.keys() if i.startswith(prefix)]
+    k = 0
+    seizIndices = []
+    for key in seizureDict:    
+        for i in range(len(seizureDict[key])):
+            if key in testPatientKeys:
+                seizIndices.append(k)
+            k = k+1
+
+    patientResults[testPatient-1,:3] = [testPatient, len(seizIndices), len(nonSeizIndices)]
+    
+    X_test = np.concatenate((X[seizIndices,:],X[nonSeizIndices,:]),axis = 0)
+    y_test = np.concatenate((y[seizIndices],y[nonSeizIndices]))
+    X_train = np.delete(X, nonSeizIndices, axis=0)
+    X_train = np.delete(X_train, seizIndices, axis=0)
+    y_train = np.delete(y,nonSeizIndices)
+    y_train = np.delete(y_train,seizIndices)
+    scaler = StandardScaler()
+    scaler.fit(X_train)
+    X_train = scaler.transform(X_train)
+    X_test = scaler.transform(X_test)
+
+
+    # Classify individual patient
+    # Insert code here ...
+    clf = AdaBoostClassifier(DecisionTreeClassifier(max_depth = 2), 
+                            learning_rate=0.5, n_estimators=150)# set classifier of choice
+    clf.fit(X_train, y_train)
+    y_pred = clf.predict(X_test)
+    
+    cm = confusion_matrix(y_test, y_pred)
+    print(testPatient, y_test, y_pred, cm)
+
+    patientResults[testPatient-1, 3:7] = [clf.score(X_test, y_test),                  # Accuracy
+                                          cm[1,1]/(cm[1,1] + cm[1,0]),                # Sens
+                                          cm[0,0]/(cm[0,0] + cm[0,1]),                # Spec
+                                          metrics.matthews_corrcoef(y_test, y_pred)]  # Matthew
+    
+    
+patientResults[-1, 3:7] = np.mean(patientResults[:,3:7], axis = 0)
+
+dash = '-' * 120
+print(dash)
+print('{:^15s}{:^15s}{:^15s}{:^15s}{:^15s}{:^15s}{:^15s}'.format('Patient', '# Seizures', 
+                        '# non Seizures', 'Accuracy', 'Sensitivity', 'Specificity', 'Matthew`s'))
+print(dash)
+for i in range(patientResults.shape[0]-1):
+    print('{:^15d}{:^15d}{:^15d}{:^15.3f}{:^15.3f}{:^15.3f}{:^15.3f}'.format(int(patientResults[i,0]), 
+                                                                             int(patientResults[i,1]), 
+                                                                             int(patientResults[i,2]), 
+                                                                             patientResults[i,3], 
+                                                                             patientResults[i,4], 
+                                                                             patientResults[i,5],
+                                                                             patientResults[i,6]))
+print(dash)
+print('{:^15s}{:^15s}{:^15s}{:^15.3f}{:^15.3f}{:^15.3f}{:^15.3f}'.format('MEAN', '', '', 
+                                                                         patientResults[-1, 3], 
+                                                                         patientResults[-1, 4], 
+                                                                         patientResults[-1, 5],
+                                                                         patientResults[-1, 6]))
+\end{minted}
+\newpage
+\begin{minted}{python}
+# PATIENT SPECIFIC TAUGANET
+
+# -*- coding: utf-8 -*-
+
+# Patient-specific classifier
+
+# Pre: Execute main.py
+
+num_epochs = 10
+
+# set up early stopping
+es = EarlyStopping(monitor='val_acc',
+                   min_delta=0,
+                   patience=5,
+                   verbose=0,
+                   mode='auto',
+                   restore_best_weights = True)
+
+def fixIndex(i):
+    if i < 10:
+        i = '0'+str(i)
+    return(str(i))
+
+nonSeizureFileNames = open('nonSeizureFileNames.txt', 'r')
+nonSeizureFileNames = nonSeizureFileNames.read().split('\n')
+
+with open('seizureDict.txt', 'r') as f:
+    s = f.read()
+    seizureDict = ast.literal_eval(s)
+
+patientResults = np.zeros((nrPatients+1, 7))
+
+for testPatient in range(1,nrPatients+1):
+    #gets index of seizures that belong to testPatient (+nrSeizures since seizure chunks are first in allData)
+    prefix = 'chb'+fixIndex(testPatient)
+    nonSeizIndices = [i+nrSeizures for i, s in enumerate(nonSeizureFileNames) if s.startswith(prefix)]
+    testPatientKeys = [i for i in seizureDict.keys() if i.startswith(prefix)]
+    k = 0
+    seizIndices = []
+    for key in seizureDict:    
+        for i in range(len(seizureDict[key])):
+            if key in testPatientKeys:
+                seizIndices.append(k)
+            k = k+1
+
+    patientResults[testPatient-1,:3] = [testPatient, len(seizIndices), len(nonSeizIndices)]
+    
+    X_test = np.concatenate((spectroData[seizIndices,:],spectroData[nonSeizIndices,:]),axis = 0)
+    y_test = np.concatenate((y[seizIndices],y[nonSeizIndices]))
+    X_train = np.delete(spectroData, nonSeizIndices, axis=0)
+    X_train = np.delete(X_train, seizIndices, axis=0)
+    y_train = np.delete(y,nonSeizIndices)
+    y_train = np.delete(y_train,seizIndices)
+    # THINK: Collect statistics on seizure/nonseizure
+    input_shape = X_train.shape[1:]
+
+    # Classify individual patient
+    # Insert code here ...
+    print('patient', testPatient)
+    nn = Sequential([ 
+                    Conv2D(60, kernel_size=(6, 2), activation='relu', padding = "same", input_shape = input_shape),
+                    Conv2D(60, kernel_size=(6, 2), activation='relu', padding = "same"),
+                    MaxPooling2D(pool_size=(3, 2)),
+                    Conv2D(120, kernel_size=(3, 3), activation='relu', padding = "same"),
+                    Conv2D(120, kernel_size=(3, 3), activation='relu', padding = "same"),
+                    MaxPooling2D(pool_size=(2, 2)),
+                    Conv2D(180, kernel_size=(3, 3), activation='relu', padding = "same"),
+                    Conv2D(180, kernel_size=(3, 3), activation='relu', padding = "same"),
+                    MaxPooling2D(pool_size=(2, 2)),
+                    Flatten(),
+                    Dense(1000, activation = 'relu'),
+                    Dropout(0.5),
+                    Dense(200, activation = 'relu'),
+                    Dropout(0.1),
+                    Dense(100, activation = 'relu'),
+                    Dense(1, activation = 'sigmoid') ])
+
+    nn.compile(loss='binary_crossentropy',
+              optimizer=Adadelta(),
+              metrics=['accuracy'])
+
+    history = nn.fit(X_train, y_train,
+                      epochs=num_epochs,
+                      callbacks = [es],
+                      verbose=1,
+                      validation_data=(X_test, y_test))
+
+
+    y_pred = nn.predict(X_test)
+    
+    for i in range(y_pred.shape[0]):
+      if y_pred[i] > 0.5:
+        y_pred[i] = 1
+      else:
+        y_pred[i] = 0
+    
+    cm = metrics.confusion_matrix(y_test, y_pred)
+
+    patientResults[testPatient-1, 3:7] = [nn.evaluate(X_test, y_test, verbose=0)[1],                  # Accuracy
+                                          cm[1,1]/(cm[1,1] + cm[1,0]),                # Sens
+                                          cm[0,0]/(cm[0,0] + cm[0,1]),                # Spec
+                                          metrics.matthews_corrcoef(y_test, y_pred)]  # Matthew
+    
+    
+patientResults[-1, 3:7] = np.mean(patientResults[:,3:7], axis = 0)
+
+dash = '-' * 120
+print(dash)
+print('{:^15s}{:^15s}{:^15s}{:^15s}{:^15s}{:^15s}{:^15s}'.format('Patient', '# Seizures', '# non Seizures', 'Accuracy', 'Sensitivity', 'Specificity', 'Matthew`s'))
+print(dash)
+for i in range(patientResults.shape[0]-1):
+    print('{:^15d}{:^15d}{:^15d}{:^15.3f}{:^15.3f}{:^15.3f}{:^15.3f}'.format(int(patientResults[i,0]), 
+                                                                             int(patientResults[i,1]), 
+                                                                             int(patientResults[i,2]), 
+                                                                             patientResults[i,3], 
+                                                                             patientResults[i,4], 
+                                                                             patientResults[i,5],
+                                                                             patientResults[i,6]))
+print(dash)
+print('{:^15s}{:^15s}{:^15s}{:^15.3f}{:^15.3f}{:^15.3f}{:^15.3f}'.format('MEAN', '', '', 
+                                                                         patientResults[-1, 3], 
+                                                                         patientResults[-1, 4], 
+                                                                         patientResults[-1, 5],
+                                                                         patientResults[-1, 6]))
+\end{minted}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+% \newpage
+% maff
+% \newpage
+% \begin{minted}{python}
+% # FEATURES
+
+% import numpy as np
+% from scipy import signal
+
+% # Hjorth parameters (time domain)
+% # https://en.wikipedia.org/wiki/Hjorth_parameters
+% def hjorth_mobility(x):
+%     num = np.var(np.diff(x))
+%     den = np.var(x)
+%     if den > 0:
+%         return np.sqrt(num / den)
+%     else:
+%         return 0.0
+
+% def hjorth_parameters(x):
+%     activity=np.var(x)
+%     mobility=hjorth_mobility(x)
+%     if mobility > 0:
+%         complexity=hjorth_mobility(np.diff(x)) / mobility
+%     else:
+%         complexity=0.0
+%     return np.array([activity, mobility, complexity])
+
+% #Calculates power spectral density for an eeg segment
+% #inputs: 
+% #signalMat: signal matrix for chunk
+% #fs: sampling density
+% #n: number of channels
+% #outputs: 
+% #f: frequency
+% #Pwelch: power spectral density calculated by Welch's method
+% def psd(signalMat,fs,n,fRange):
+%     Pwelch = np.zeros((n,fRange))
+%     for i in range(n):
+%         F,Pwelch[i,:] = signal.welch(signalMat[i,:],fs,scaling = 'spectrum')
+%     return(F,Pwelch)
+
+% # Absolute band power
+% # Combined power in M frequency bands
+% def absolute_power(f, PSD,M,l,h):
+%     length = (h-l)/M
+%     power = []
+%     k = l
+%     for i in range(M):
+%         power.append(sum(PSD[np.where((f > k) & (f <= k+length))]))
+%         k +=length
+%     return(power)
+    
+% #Relative power of delta, theta, alpha 
+% #and beta waves for a single channel
+% def relative_power(f,PSD,M,l,h):
+%     absPow = absolute_power(f,PSD,M,l,h)
+%     tot = sum(PSD)
+%     if tot > 0.0:
+%         return(absPow/tot)
+%     else:
+%         return 0.0
+
+% # Calculate relative band power for the whole data set
+% # THINK: Might want to do the same for absolute power
+% def relative_power_all(allData, nrSeizures, nrChannels, fRange, fs, M, fLowerLimit, fUpperLimit):
+%     dataPSD = np.zeros((nrSeizures*2,nrChannels,fRange))
+%     for i in range(nrSeizures*2):
+%         [F,dataPSD[i,:,:]] = psd(allData[i,:,:],fs,nrChannels,fRange)
+
+%     dataRelPower = np.zeros((nrSeizures*2,nrChannels,M))
+%     for i in range(nrSeizures*2):
+%         for j in range(nrChannels):
+%             dataRelPower[i,j,:] = relative_power(F,dataPSD[i,j,:],M,fLowerLimit,fUpperLimit)
+%     return(dataRelPower)
+    
+% def create_data_matrix(allData, nrSeizures, nrChannels, fRange, fs, M, fLowerLimit, fUpperLimit, seizureLength, tlength, hjorth = True):
+    
+%     assert tlength <= seizureLength, 'tlength more than seizureLength'
+%     numt = seizureLength - tlength + 1
+%     dataRelPower = np.zeros((nrSeizures*2, nrChannels, M, numt))
+%     k = 0
+%     while k+tlength <= seizureLength:
+%         tData = allData[:,:,k:int(k+tlength*fs-1)]
+%         dataRelPower[:,:,:,k] = relative_power_all(tData, nrSeizures, nrChannels, fRange, fs, M, fLowerLimit, fUpperLimit)
+%         k += 1
+        
+%     dataRelPowerFlat = np.zeros((nrSeizures*2,nrChannels*M*numt))
+%     for i in range(nrSeizures*2):
+%         dataRelPowerFlat[i,:] = dataRelPower[i,:,:,:].flatten()
+        
+%     if hjorth:
+%         hjopar = np.zeros((nrSeizures*2,nrChannels,3,numt))
+%         for i in range(nrSeizures*2):
+%             for j in range(nrChannels):
+%                 k = 0
+%                 while k+tlength <= seizureLength:
+%                     tData = allData[:,:,k:int(k+tlength*fs-1)]
+%                     hjopar[i,j,:,k] = hjorth_parameters(tData[i,j,:])
+%                     k += 1
+                    
+%         hjoparflat = np.zeros((nrSeizures*2,nrChannels*3*numt))
+%         for i in range(nrSeizures*2):
+%             hjoparflat[i,:] = hjopar[i,:,:,:].flatten()
+%         dataRelPowerFlat = np.c_[dataRelPowerFlat, hjoparflat]
+    
+    
+%     X = dataRelPowerFlat
+%     y = np.concatenate((np.repeat(1,nrSeizures),np.repeat(0,nrSeizures)))
+        
+%     return(X,y)
+
+% # READ DATA
+
+% import numpy as np
+
+% from sklearn.model_selection import train_test_split
+% from sklearn.linear_model import LogisticRegression
+
+% #input: 
+% #filename: name of file to read from
+% #shape: dimension of resulting array                   
+% def read3DArrayFromFile(fileName,shape):                      
+%     data = np.loadtxt(fileName, dtype = 'float32')
+%     data = data.reshape(shape)
+%     return(data)
+
+% nrPatients = 24
+% fs = 256 # Sampling rate
+% nrChannels = 23
+% seizureLength = 14 # seconds
+% nrSeizures = 170
+% fRange = 129
+% M = 16
+% fLowerLimit = 0.5
+% fUpperLimit = 25
+% dataShape = (nrSeizures,nrChannels,seizureLength*fs)
+
+% # Read raw data
+% seizureData = read3DArrayFromFile('seizureChunks14.txt',dataShape)
+% nonSeizureData = read3DArrayFromFile('nonSeizureChunks14.txt',dataShape)
+% allData = np.concatenate((seizureData,nonSeizureData),axis = 0)
+
+% # GÆÐAMAT Á FLOKKURUM
+% """ þarfnast að gögnin séu tilbúin """
+
+
+% def GS(estimator, parameters):
+%     clf = GridSearchCV(estimator, parameters, cv = 5)
+%     clf.fit(X_train, y_train)
+%     acc = clf.score(X_test, y_test)
+%     y_pred = clf.predict(X_test)
+    
+%     cm = confusion_matrix(y_test, y_pred)
+%     sens = cm[1,1]/(cm[1,1] + cm[1,0])
+%     spec = cm[0,0]/(cm[0,0] + cm[0,1])
+    
+%     opt_par = clf.best_params_
+
+%     return opt_par, acc, sens, spec
+
+% params_LR = {'C' : [0.5, 1, 5, 8, 10, 20] }
+
+% params_svm = {'C' : [0.5, 1, 5, 8, 10, 20],
+%               'gamma' : [0.0015, 0.01, 0.1, 1] }
+
+% params_ada = {'n_estimators' : [25, 50, 100, 150], 
+%               'learning_rate':[0.01, 0.1, 0.5, 1] }
+
+% compare_clf = np.zeros((3, 3))
+
+% logreg_GS = GS(LogisticRegression(), params_LR)
+% svm_GS = GS(SVC(), params_svm)
+% ada_GS = GS(AdaBoostClassifier(DecisionTreeClassifier(max_leaf_nodes = 4)), params_ada)
+
+% logreg_par = logreg_GS[0]
+% svm_par = svm_GS[0]
+% ada_par = ada_GS[0]
+
+% compare_clf[0,:] = logreg_GS[1:]
+% compare_clf[1,:] = svm_GS[1:]
+% compare_clf[2,:] = ada_GS[1:]
+
+% # plot comparison
+% plt.rcParams.update({'font.size': 20})
+
+% index = np.arange(3)
+% bar_width = 0.2
+
+% plt.figure(figsize = (18, 8))
+
+% plt.bar(index, compare_clf[0,:], bar_width, color='darkorange', label='LogReg')
+% plt.bar(index + bar_width, compare_clf[1,:], bar_width, color='darkcyan', label='SVM')
+% plt.bar(index + 2*bar_width, compare_clf[2,:], bar_width, color='darkmagenta', label='AdaBoost')
+% plt.grid(axis = 'y', linestyle = '-.', color = 'black')
+
+% plt.title('Samanburður á flokkurum')
+% plt.xticks(index + bar_width, ['Accuracy', 'Sensitivity', 'Specificity'])
+% plt.legend()
+% plt.show()
+
+% print('Stikar LogReg', logreg_par)
+% print('Stikar SVM', svm_par)
+% print('Stikar AdaBoost', ada_par)
+
+% # RUGLINGSFYLKI SVM
+
+% tlength = 13
+% [X,y] = create_data_matrix(allData, nrSeizures+100, nrChannels, fRange, fs, M, fLowerLimit, fUpperLimit, seizureLength, tlength, hjorth = True)
+% print("X:", X.shape)
+% print("y:", y.shape)
+% X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
+% scaler = StandardScaler()
+% X_train = scaler.fit_transform(X_train)
+% X_test = scaler.transform(X_test)
+
+% clf = SVC(C = 8, gamma = 0.0015)
+% clf.fit(X_train, y_train)
+% y_pred = clf.predict(X_test)
+
+% cm = confusion_matrix(y_test,y_pred)
+% plt.figure(figsize=(7,7))
+% plt.imshow(cm, cmap='Wistia')
+% plt.xlabel('Raunverulegt gildi')
+% plt.ylabel('Metið gildi')
+% plt.xticks([0,1], ['Ekki flog', 'Flog'])
+% plt.yticks([0,1], ['Ekki flog', 'Flog'], rotation = 90, va = 'center')
+% n = cm.shape[0]
+% p = cm.shape[1]
+% for i in range(n):
+%     for j in range(p):        
+%         plt.annotate(str(cm[i,j]),xy=(i,j), 
+%                      horizontalalignment='center', verticalalignment='center')
+        
+% sens = cm[1,1]/(cm[1,1] + cm[1,0])
+% spec = cm[0,0]/(cm[0,0] + cm[0,1])
+
+% print('Model sensitivity:', sens)
+% print('Model specificity:', spec)
+
+% print('Matthews correlation coefficient ', metrics.matthews_corrcoef(y_test, y_pred))  
+
+% # SPECTROGRAM
+% from scipy.signal import spectrogram
+
+% seglength = 2
+% stepsize = 1
+
+% freq = int(fs*seglength / 2) + 1
+% time = int(seizureLength / stepsize)-1
+
+% spectroData = np.zeros((nrSeizures*2, freq, time, nrChannels))
+
+% for i in range(nrSeizures*2):
+%     for j in range(nrChannels):
+%         freqq, timee, Sx = signal.spectrogram(allData[i, j, :], fs = fs, nperseg = fs*seglength, noverlap = fs*(seglength - stepsize))
+%         spectroData[i, :, :, j] = 10 * np.log10(Sx)
+
+% # PLOT SPECTROGRAM
+
+% import matplotlib.pyplot as plt
+% plt.rcParams.update({'font.size': 20})
+
+% seizCase = 150
+% nonseizCase = -13
+
+
+% plt.figure(figsize=(24,16))
+
+% plt.subplot(2,2,1)
+% plt.plot(range(fs*seizureLength), allData[seizCase,1,:], 'b-')
+% plt.xticks(np.arange(15)*fs, np.arange(15))
+% plt.xlabel('Tími (sek)')
+% plt.title('Tímaröð af flogakasti')
+
+% plt.subplot(2,2,2)
+% plt.plot(range(fs*seizureLength), allData[nonseizCase,10,:], 'b-')
+% plt.xticks(np.arange(15)*fs, np.arange(15))
+% plt.xlabel('Tími (sek)')
+% plt.title('Tímaröð af heilbrigðu heilariti')
+
+% plt.subplot(2,2,3)
+% plt.pcolormesh(range(time), np.arange(0, freq/2, 0.5) / 1000, spectroData[seizCase,:,:,1], cmap='viridis')
+% plt.ylabel('Tíðni (kHz)')
+% plt.xlabel('Tími (sek)')
+% plt.title('Rófrit af flogakasti')
+
+% plt.subplot(2,2,4)
+% plt.pcolormesh(range(time), np.arange(0, freq/2, 0.5) / 1000, spectroData[nonseizCase,:,:,10], cmap='viridis')
+% plt.ylabel('Tíðni (kHz)')
+% plt.xlabel('Tími (sek)')
+% plt.title('Rófrit af heilbrigðu heilariti')
+% plt.show
+
+% plt.savefig('rofrit.png')
+
+% # TAUGANET
+
+% X_train, X_test, y_train, y_test = train_test_split(spectroData, y, test_size=0.25, random_state=24)
+
+% # Convert to 32-bit floats
+% X_train = X_train.astype('float32')
+% X_test = X_test.astype('float32')
+
+% print(X_train.shape)
+% num_epochs = 30
+% input_shape = X_train.shape[1:]
+
+% # set up early stopping
+% es = EarlyStopping(monitor='val_loss',
+%                   min_delta=0,
+%                   patience=3,
+%                   verbose=0, mode='auto')
+
+% nn = Sequential([ 
+%     Conv2D(60, kernel_size=(6, 2), activation='relu', padding = "same", input_shape = input_shape),
+%     Conv2D(60, kernel_size=(6, 2), activation='relu', padding = "same"),
+%     MaxPooling2D(pool_size=(3, 2)),
+%     Conv2D(120, kernel_size=(3, 3), activation='relu', padding = "same"),
+%     Conv2D(120, kernel_size=(3, 3), activation='relu', padding = "same"),
+%     MaxPooling2D(pool_size=(2, 2)),
+%     Conv2D(180, kernel_size=(3, 3), activation='relu', padding = "same"),
+%     Conv2D(180, kernel_size=(3, 3), activation='relu', padding = "same"),
+%     MaxPooling2D(pool_size=(2, 2)),
+%     Flatten(),
+%     Dense(1000, activation = 'relu'),
+%     Dropout(0.5),
+%     Dense(200, activation = 'relu'),
+%     Dropout(0.1),
+%     Dense(100, activation = 'relu'),
+%     Dense(1, activation = 'sigmoid') ])
+
+% nn.summary()
+
+% nn.compile(loss='binary_crossentropy',
+%               optimizer=Adadelta(),
+%               metrics=['accuracy'])
+
+% history = nn.fit(X_train, y_train,
+%                   epochs=num_epochs,
+%                   callbacks = [es],
+%                   verbose=1,
+%                   validation_data=(X_test, y_test))
+% score = nn.evaluate(X_test, y_test, verbose=0)
+% print('val loss:', score[0])
+% print('val accuracy:', score[1])
+
+% # Visualize training history 
+% import matplotlib.pyplot as plt
+
+% plt.figure(figsize = (15,5))
+% plt.subplot(1,2,1)
+% plt.plot(history.history['acc'])
+% plt.plot(history.history['val_acc'])
+% plt.ylabel('accuracy')
+% plt.xlabel('epoch')
+% plt.title('Lærdómur Tauganetsins')
+% plt.legend(['train', 'validation'])
+
+% plt.subplot(1,2,2)
+% plt.plot(history.history['loss'])
+% plt.plot(history.history['val_loss'])
+% plt.ylabel('loss')
+% plt.xlabel('epoch')
+% plt.legend(['train', 'validation'])
+% plt.show()
+
+% # TAUGANETSRUGLINGSFYLKI
+
+% y_pred = nn.predict(X_test)
+
+% for i in range(y_pred.shape[0]):
+%   if y_pred[i] > 0.5:
+%     y_pred[i] = 1
+%   else:
+%     y_pred[i] = 0
+    
+% nncm = confusion_matrix(y_test,y_pred)
+% plt.figure(figsize=(7,7))
+% plt.imshow(nncm, cmap='Wistia')
+% plt.xlabel('Raunverulegt gildi')
+% plt.ylabel('Metið gildi')
+% plt.xticks([0,1], ['Ekki flog', 'Flog'])
+% plt.yticks([0,1], ['Ekki flog', 'Flog'], rotation = 90, va = 'center')
+% n = nncm.shape[0]
+% p = nncm.shape[1]
+% for i in range(n):
+%     for j in range(p):        
+%         plt.annotate(str(nncm[i,j]),xy=(i,j), 
+%                      horizontalalignment='center', verticalalignment='center')
+        
+% sens = nncm[1,1]/(nncm[1,1] + nncm[1,0])
+% spec = nncm[0,0]/(nncm[0,0] + nncm[0,1])
+
+% print('Model sensitivity:', sens)
+% print('Model specificity:', spec)
+
+% print('Matthews correlation coefficient ', metrics.matthews_corrcoef(y_test, y_pred))  
+
+% # PATIENT SPECIFIC
+
+% # -*- coding: utf-8 -*-
+
+% # Patient-specific classifier
+
+% # Pre: Execute main.py
+
+% def fixIndex(i):
+%     if i < 10:
+%         i = '0'+str(i)
+%     return(str(i))
+
+% nonSeizureFileNames = open('nonSeizureFileNames.txt', 'r')
+% nonSeizureFileNames = nonSeizureFileNames.read().split('\n')
+
+% with open('seizureDict.txt', 'r') as f:
+%     s = f.read()
+%     seizureDict = ast.literal_eval(s)
+
+% patientResults = np.zeros((nrPatients+1, 7))
+
+% for testPatient in range(1,nrPatients+1):
+%     #gets index of seizures that belong to testPatient (+nrSeizures since seizure chunks are first in allData)
+%     prefix = 'chb'+fixIndex(testPatient)
+%     nonSeizIndices = [i+nrSeizures for i, s in enumerate(nonSeizureFileNames) if s.startswith(prefix)]
+%     testPatientKeys = [i for i in seizureDict.keys() if i.startswith(prefix)]
+%     k = 0
+%     seizIndices = []
+%     for key in seizureDict:    
+%         for i in range(len(seizureDict[key])):
+%             if key in testPatientKeys:
+%                 seizIndices.append(k)
+%             k = k+1
+
+%     patientResults[testPatient-1,:3] = [testPatient, len(seizIndices), len(nonSeizIndices)]
+    
+%     X_test = np.concatenate((X[seizIndices,:],X[nonSeizIndices,:]),axis = 0)
+%     y_test = np.concatenate((y[seizIndices],y[nonSeizIndices]))
+%     X_train = np.delete(X, nonSeizIndices, axis=0)
+%     X_train = np.delete(X_train, seizIndices, axis=0)
+%     y_train = np.delete(y,nonSeizIndices)
+%     y_train = np.delete(y_train,seizIndices)
+%     scaler = StandardScaler()
+%     scaler.fit(X_train)
+%     X_train = scaler.transform(X_train)
+%     X_test = scaler.transform(X_test)
+
+
+%     # Classify individual patient
+%     # Insert code here ...
+%     clf = AdaBoostClassifier(DecisionTreeClassifier(max_depth = 2), learning_rate=0.5, n_estimators=150)    # set classifier of choice
+%     clf.fit(X_train, y_train)
+%     y_pred = clf.predict(X_test)
+    
+%     cm = confusion_matrix(y_test, y_pred)
+%     print(testPatient, y_test, y_pred, cm)
+
+%     patientResults[testPatient-1, 3:7] = [clf.score(X_test, y_test),                  # Accuracy
+%                                           cm[1,1]/(cm[1,1] + cm[1,0]),                # Sens
+%                                           cm[0,0]/(cm[0,0] + cm[0,1]),                # Spec
+%                                           metrics.matthews_corrcoef(y_test, y_pred)]  # Matthew
+    
+    
+% patientResults[-1, 3:7] = np.mean(patientResults[:,3:7], axis = 0)
+
+% dash = '-' * 120
+% print(dash)
+% print('{:^15s}{:^15s}{:^15s}{:^15s}{:^15s}{:^15s}{:^15s}'.format('Patient', '# Seizures', '# non Seizures', 'Accuracy', 'Sensitivity', 'Specificity', 'Matthew`s'))
+% print(dash)
+% for i in range(patientResults.shape[0]-1):
+%     print('{:^15d}{:^15d}{:^15d}{:^15.3f}{:^15.3f}{:^15.3f}{:^15.3f}'.format(int(patientResults[i,0]), 
+%                                                                              int(patientResults[i,1]), 
+%                                                                              int(patientResults[i,2]), 
+%                                                                              patientResults[i,3], 
+%                                                                              patientResults[i,4], 
+%                                                                              patientResults[i,5],
+%                                                                              patientResults[i,6]))
+% print(dash)
+% print('{:^15s}{:^15s}{:^15s}{:^15.3f}{:^15.3f}{:^15.3f}{:^15.3f}'.format('MEAN', '', '', 
+%                                                                          patientResults[-1, 3], 
+%                                                                          patientResults[-1, 4], 
+%                                                                          patientResults[-1, 5],
+%                                                                          patientResults[-1, 6]))
+% \end{minted}
+ \end{document}
